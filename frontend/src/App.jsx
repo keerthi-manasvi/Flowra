@@ -14,15 +14,16 @@ import {
 import '@xyflow/react/dist/style.css';
 import ChatThreadNode, { CanvasContext } from './ChatThreadNode.jsx';
 import { layout } from './layout.js';
+import NodeDetailModal from './NodeDetailModal.jsx';
 
 const nodeTypes = { chatThread: ChatThreadNode };
 const edgeOptions = { type: 'smoothstep', markerEnd: { type: MarkerType.ArrowClosed } };
 
-async function post(url, body) {
+async function request(method, url, body) {
   const res = await fetch(url, {
-    method: 'POST',
+    method,
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
+    body: body && JSON.stringify(body),
   });
   if (!res.ok) {
     const { detail } = await res.json().catch(() => ({}));
@@ -30,6 +31,7 @@ async function post(url, body) {
   }
   return res.json();
 }
+const post = (url, body) => request('POST', url, body);
 
 function NewThread({ onStart }) {
   const [text, setText] = useState('');
@@ -81,6 +83,11 @@ function Canvas() {
   const { fitView } = useReactFlow();
   const initialized = useNodesInitialized();
   const fitted = useRef(false);
+  const [selectedId, setSelectedId] = useState(null);
+  const selected = nodes.find((n) => n.id === selectedId); // derived, so it never goes stale
+  const onNodeClick = useCallback((e, n) => {
+    if (!e.target.closest('button, input, textarea, .messages')) setSelectedId(n.id);
+  }, []);
 
   // Refs hold the latest graph so concurrent async completions never merge into stale state.
   const nodesRef = useRef(nodes);
@@ -123,6 +130,54 @@ function Canvas() {
     (content) => post('/api/threads', { content }).then((r) => commit(r, null)),
     [commit],
   );
+  const deleteThread = useCallback(
+  async (threadId) => {
+    const res = await fetch(`/api/threads/${threadId}`, {
+      method: 'DELETE',
+    });
+
+    if (!res.ok) {
+      const { detail } = await res.json().catch(() => ({}));
+      throw new Error(
+        typeof detail === 'string'
+          ? detail
+          : res.statusText
+      );
+    }
+
+    const graph = await res.json();
+
+    const alive = new Set(
+      graph.nodes.map((node) => node.id)
+    );
+
+    const nextNodes = nodesRef.current.filter(
+      (node) => alive.has(node.id)
+    );
+
+    const nextEdges = edgesRef.current.filter(
+      (edge) =>
+        alive.has(edge.source) &&
+        alive.has(edge.target)
+    );
+
+    nodesRef.current = nextNodes;
+    edgesRef.current = nextEdges;
+
+    const laidOut = layout(
+      nextNodes,
+      nextEdges,
+      null
+    );
+
+    nodesRef.current = laidOut;
+    edgesRef.current = nextEdges;
+
+    setNodes(laidOut);
+    setEdges(nextEdges);
+  },
+  [setNodes, setEdges]
+);
 
   useEffect(() => {
     fetch('/api/graph')
@@ -139,7 +194,7 @@ function Canvas() {
     }
   }, [initialized, nodes.length, fitView]);
 
-  const context = useMemo(() => ({ sendMessage, forkThread }), [sendMessage, forkThread]);
+  const context = useMemo(() => ({ sendMessage, forkThread, deleteThread }), [sendMessage, forkThread, deleteThread]);
 
   return (
     <CanvasContext.Provider value={context}>
@@ -150,6 +205,7 @@ function Canvas() {
         preventScrolling={false}
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
+        onNodeClick={onNodeClick}
         defaultEdgeOptions={edgeOptions}
         nodesDraggable={false}
         nodesConnectable={false}
@@ -165,6 +221,9 @@ function Canvas() {
           <NewThread onStart={startThread} />
         </Panel>
       </ReactFlow>
+      {selected && (
+        <NodeDetailModal node={selected} onClose={() => setSelectedId(null)} onFork={forkThread} onSelect={setSelectedId} />
+      )}
     </CanvasContext.Provider>
   );
 }

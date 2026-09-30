@@ -5,12 +5,12 @@ import re
 import sqlite3
 import uuid
 from contextlib import asynccontextmanager
-from typing import Annotated
+from typing import Annotated, Literal
 
 import openai
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, StringConstraints
+from pydantic import BaseModel, ConfigDict, StringConstraints
 
 import db
 
@@ -35,9 +35,27 @@ Reply with a JSON object only:
 - summary: facts, decisions and open questions needed to continue, at most 150 words."""
 
 # Fenced-code tags that count as a programming language, normalised through ALIASES.
-LANGS = {"python", "javascript", "typescript", "go", "java", "rust", "ruby", "php", "csharp", "cpp", "c", "kotlin", "swift", "scala"}
-ALIASES = {"py": "python", "js": "javascript", "jsx": "javascript", "node": "javascript", "ts": "typescript",
-           "tsx": "typescript", "golang": "go", "rs": "rust", "rb": "ruby", "c#": "csharp", "cs": "csharp", "c++": "cpp"}
+LANGS = {
+    "python", "javascript", "typescript", "go", "java", "rust", 
+    "ruby", "php", "csharp", "cpp", "c", "kotlin", "swift", "scala",
+    "react", "jsx", "tsx", "html", "css"
+}
+
+ALIASES = {
+    "py": "python",
+    "js": "javascript",
+    "jsx": "javascript",
+    "node": "javascript",
+    "ts": "typescript",
+    "tsx": "typescript",
+    "golang": "go",
+    "rs": "rust",
+    "rb": "ruby",
+    "c#": "csharp",
+    "cs": "csharp",
+    "c++": "cpp",
+    "react": "javascript",  # Maps React constraints to JavaScript/JSX fenced blocks
+}
 FENCE = re.compile(r"^\s*```\s*([\w+#-]+)", re.M)
 
 
@@ -66,6 +84,10 @@ class ArchitecturalConstraints(BaseModel):
     style_rules: list[str] = []
 
 
+class Override(ArchitecturalConstraints):
+    model_config = ConfigDict(extra="forbid")  # API accepts only the supported fields
+
+
 def graph():
     threads = db.all_threads()
     return {
@@ -78,7 +100,7 @@ def graph():
                     "title": t["title"],
                     "parent_id": t["parent_id"],
                     "messages": t["messages"],
-                    "constraints": t["constraints"],
+                    **(t["edge"] or {}),  # inherited_constraints, overrides, effective_constraints, summary
                 },
             }
             for t in threads
@@ -108,17 +130,17 @@ def llm(messages, **kwargs):
 
 def context(thread_id):
     """(history, edge) for a thread. Forks see only their own turns; the parent arrives compressed via edge."""
-    edge = db.get_edge_constraints(thread_id)
+    edge = db.get_edge(thread_id)
     if not edge:
         return db.get_thread_ancestry(thread_id), None
     return [{"role": m["role"], "content": m["content"]} for m in db.get_thread_messages(thread_id)], edge
 
 
 def compress(parent_id):
-    """Fork-time: summarise the parent's context and extract its constraints. The parent's own edge
-    constraints (including user overrides) are inherited as-is; extraction only fills unset fields."""
+    """Fork-time: summarise the parent's context and extract its constraints. The parent's EFFECTIVE
+    constraints (inherited + overrides) are inherited as-is; extraction only fills unset fields."""
     history, edge = context(parent_id)
-    inherited = edge["constraints"] if edge else {}
+    inherited = edge["effective_constraints"] if edge else {}
     payload = {"active_constraints": inherited, "prior_summary": edge["summary"] if edge else "", "conversation": history}
     raw = llm(
         [{"role": "system", "content": COMPRESS_PROMPT}, {"role": "user", "content": json.dumps(payload)}],
@@ -130,17 +152,18 @@ def compress(parent_id):
     except (ValueError, AttributeError) as e:  # bad JSON, non-object JSON, or pydantic ValidationError
         raise HTTPException(502, f"constraint extraction failed: {e}")
     constraints = ArchitecturalConstraints(**{**found, **{k: v for k, v in inherited.items() if v}}).model_dump()
-    return {"constraints": constraints, "summary": str(out.get("summary") or "")}
+    return {"effective_constraints": constraints, "summary": str(out.get("summary") or "")}
 
 
 def inherit(edge):
-    """The protected system block a fork's LLM calls start with."""
+    """The protected system block a fork's LLM calls start with, built from the effective constraints."""
     rules = "\n".join(
-        f"- {k}: {'; '.join(v) if isinstance(v, list) else v}" for k, v in edge["constraints"].items() if v
+        f"- {k}: {'; '.join(v) if isinstance(v, list) else 'MUST be ' + v}"
+        for k, v in edge["effective_constraints"].items() if v
     )
     return (
-        "Binding architectural constraints inherited from the parent branch. Never deviate from them; if the "
-        f"user asks for something that conflicts, say so instead of complying.\n{rules or '- none'}\n\n"
+        f"BINDING ARCHITECTURAL CONSTRAINTS:\n{rules or '- none'}\n\n"
+        "If user requests conflict with these constraints, explicitly raise an architectural conflict error.\n\n"
         f"Compressed parent context:\n{edge['summary'] or '(empty)'}"
     )
 
@@ -156,19 +179,41 @@ def reject(text, reason):
 
 
 def validate(text, constraints):
-    """Deterministic check: every fenced code block in a known language must match the required one."""
     if not constraints.get("language"):
         return text
-    want = canonical(re.split(r"[\s/,(]", constraints["language"].strip())[0])  # "Python 3.12 / FastAPI" -> python
-    bad = sorted({lang for lang in map(canonical, FENCE.findall(text)) if lang in LANGS and lang != want})
-    return reject(text, f"language must be {want}, reply contains {', '.join(bad)}") if bad else text
+
+    # Extract all valid canonical language tags mentioned in the constraint string
+    tokens = re.split(r"[\s/,(]+", constraints["language"].strip())
+    allowed = {canonical(tok) for tok in tokens if canonical(tok) in LANGS}
+
+    if not allowed:
+        return text
+
+    # Check for any fenced code block language that isn't in the allowed set
+    found = {canonical(lang) for lang in FENCE.findall(text)}
+    bad = sorted({lang for lang in found if lang in LANGS and lang not in allowed})
+
+    if bad:
+        allowed_str = ", ".join(sorted(allowed))
+        return reject(
+            text,
+            f"language must be one of [{allowed_str}], reply contains {', '.join(bad)}"
+        )
+
+    return text
 
 
 def complete(history, edge=None):
-    """One LLM turn; forks get the inherited constraints injected first and the reply validated."""
+    """One LLM turn; forks get the effective constraints injected first and the reply validated."""
     if not edge:
         return llm(history)
-    return validate(llm([{"role": "system", "content": inherit(edge)}] + history), edge["constraints"])
+    return validate(llm([{"role": "system", "content": inherit(edge)}] + history), edge["effective_constraints"])
+
+
+def constraint_state(thread_id, edge):
+    if not edge:
+        raise HTTPException(404, "thread has no parent edge")
+    return {"thread_id": thread_id, **edge}
 
 
 # Plain `def` routes: FastAPI runs them in a threadpool, so the blocking SDK and sqlite
@@ -186,12 +231,24 @@ def create_thread(body: NewThread):
         raise HTTPException(404, "parent thread not found")
 
     thread_id = body.id or uuid.uuid4().hex
-    # LLM calls first: nothing is persisted unless the whole fork/turn succeeds.
     edge = compress(body.parent_id) if body.parent_id else None
+
     msgs = []
     if body.content:
+        # Pass edge directly
         reply = complete([{"role": "user", "content": body.content}], edge)
         msgs = [("user", body.content), ("assistant", reply)]
+
+    try:
+        db.create_thread(thread_id, body.parent_id, msgs, edge)
+    except sqlite3.IntegrityError:
+        raise HTTPException(409, "thread id already exists")
+
+    return {
+        "thread_id": thread_id,
+        "messages": db.get_thread_messages(thread_id),
+        **graph()
+    }
 
     try:
         db.create_thread(thread_id, body.parent_id, msgs, edge)
@@ -213,10 +270,20 @@ def post_message(thread_id: str, body: NewMessage):
 
     return {"thread_id": thread_id, "messages": db.get_thread_messages(thread_id), **graph()}
 
+@app.delete("/api/threads/{thread_id}")
+def delete_thread(thread_id: str):
+    if not db.delete_thread(thread_id):
+        raise HTTPException(404, "thread not found")
+    return graph()
 
 @app.put("/api/threads/{thread_id}/constraints")
-def override(thread_id: str, body: ArchitecturalConstraints):
-    constraints = body.model_dump()
-    if not db.override_edge_constraints(thread_id, constraints):
-        raise HTTPException(404, "thread has no inherited constraints")
-    return {"thread_id": thread_id, "constraints": constraints}
+def override(thread_id: str, body: Override):
+    patch = body.model_dump(exclude_unset=True)
+    if not patch or None in patch.values():
+        raise HTTPException(422, "send at least one non-null supported field")
+    return constraint_state(thread_id, db.set_override(thread_id, patch))
+
+
+@app.delete("/api/threads/{thread_id}/constraints/{field}")
+def revoke(thread_id: str, field: Literal["language", "database", "style_rules"]):
+    return constraint_state(thread_id, db.revoke_override(thread_id, field))

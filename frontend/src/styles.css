@@ -293,3 +293,21 @@ textarea:focus-visible {
 input.badge { cursor: text; width: 16ch; }
 .audit-alert { margin: 4px 8px; padding: 6px 10px; border: 1px solid #dc2626; border-radius: 6px; background: rgb(220 38 38 / 0.15); color: #dc2626; font-size: 12px; font-weight: 600; animation: audit-glow 1.6s ease-in-out infinite; }
 @keyframes audit-glow { 50% { box-shadow: 0 0 12px 2px rgb(220 38 38 / 0.7); } }
+
+/* Node detail dialog */
+.detail { width: min(680px, 92vw); max-height: 85vh; padding: 0; color: var(--ink); background: var(--card); border: 1px solid var(--line); border-radius: 12px; font-size: 14px; }
+.detail[open] { display: flex; flex-direction: column; }
+.detail::backdrop { background: rgb(0 0 0 / 0.55); }
+.detail header, .detail footer { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; padding: 12px 16px; }
+.detail footer { justify-content: flex-end; align-items: center; border-top: 1px solid var(--line); }
+.detail header small { color: var(--muted); font-family: monospace; }
+.detail h3 { margin: 4px 0 0; }
+.detail h4 { margin: 0 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--accent); }
+.detail section { padding: 8px 16px; border-top: 1px solid var(--line); }
+.detail .history { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+.detail .badges { padding: 0; }
+.detail .summary { margin: 0; padding: 8px 12px; border-left: 3px solid var(--accent); background: var(--user); border-radius: 4px; }
+.detail .msg { padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.detail .msg.user { background: var(--user); border-color: var(--user-line); }
+.detail .error { margin-right: auto; color: var(--danger); }
+.detail button.link { border: 0; padding: 0; background: none; color: var(--accent); text-decoration: underline; }

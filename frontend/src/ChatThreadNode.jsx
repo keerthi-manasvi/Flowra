@@ -10,42 +10,96 @@ const REJECT_TAG = '[⚠️ AUDIT REJECTION:'; // must match backend main.REJECT
 const FIELDS = { language: 'Language', database: 'Database', style_rules: 'Style' };
 const show = (v) => (Array.isArray(v) ? v.join('; ') : v) || '';
 
-// Click to edit, Enter saves, Escape/blur cancels.
-function Badge({ label, value, onSave }) {
+// Effective value first, inherited value as a hint when overridden. Override -> input (Enter saves,
+// Escape or click-away cancels, nothing is sent). Revoke -> DELETE. Controls lock while a request is pending.
+function Badge({ label, value, inherited, overridden, onSave, onRevoke }) {
   const [draft, setDraft] = useState(null); // null = not editing
-  if (draft === null) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+
+  const run = async (fn) => {
+    setBusy(true);
+    setErr(null);
+    try {
+      await fn();
+      setDraft(null);
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (draft !== null) {
     return (
-      <button type="button" className="badge nodrag nopan" title="Click to override" onClick={() => setDraft(value)}>
-        🔒 {label}: {value || '—'}
-      </button>
+      <span className="chip">
+        <input
+          className="badge nodrag nopan"
+          autoFocus
+          disabled={busy}
+          value={draft}
+          aria-label={`Override ${label}`}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={() => !busy && setDraft(null)}
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') setDraft(null);
+            if (e.key !== 'Enter') return;
+            const v = draft.trim();
+            if (!v || v === value) setDraft(null);
+            else run(() => onSave(v));
+          }}
+        />
+        {busy && <span role="status">…</span>}
+        {err && <span className="error" role="alert">{err}</span>}
+      </span>
     );
   }
   return (
-    <input
-      className="badge nodrag nopan"
-      autoFocus
-      value={draft}
-      aria-label={`Override ${label}`}
-      onChange={(e) => setDraft(e.target.value)}
-      onBlur={() => setDraft(null)}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter' && draft.trim() !== value) onSave(draft.trim());
-        if (e.key === 'Enter' || e.key === 'Escape') setDraft(null);
-      }}
-    />
+    <span className="chip">
+      <span className="badge">
+        {value && '🔒 '}{label}: {value || '—'}{overridden && inherited ? ` (Inherited: ${inherited})` : ''}
+      </span>
+      <button
+        type="button"
+        className="nodrag nopan"
+        disabled={busy}
+        onClick={() => (overridden ? run(onRevoke) : setDraft(value))}
+      >
+        {busy ? '…' : overridden ? 'Revoke' : 'Override'}
+      </button>
+      {err && <span className="error" role="alert">{err}</span>}
+    </span>
   );
 }
 
 function ChatThreadNode({ id, data }) {
-  const { sendMessage, forkThread } = useContext(CanvasContext);
+  const {
+  sendMessage,
+  forkThread,
+  deleteThread,
+} = useContext(CanvasContext);
+
+const [deleting, setDeleting] = useState(false);
   const { updateNodeData } = useReactFlow(); // writes through App's onNodesChange -> canvas re-renders
-  const { title, messages, constraints } = data;
+  const { title, messages, effective_constraints: eff, inherited_constraints: inh, overrides: ov } = data;
 
   const [text, setText] = useState('');
   const [inflight, setInflight] = useState(null); // user text awaiting its reply
   const [error, setError] = useState(null);
   const list = useRef(null);
+  const queue = useRef(Promise.resolve()); // constraint requests run in order, so responses can't land out of order
   const busy = inflight !== null;
+  const remove = async () => {
+  if (!window.confirm('Delete this thread and all its sub-threads?')) return;
+  setDeleting(true);
+  setError(null);
+  try {
+    await deleteThread(id); // on success this node unmounts
+  } catch (e) {
+    setError(e.message);
+    setDeleting(false);
+  }
+};
 
   // Set scrollTop directly: scrollIntoView can also scroll React Flow's viewport (moving the camera).
   useEffect(() => {
@@ -68,26 +122,25 @@ function ChatThreadNode({ id, data }) {
     }
   };
 
-  const override = async (field, raw) => {
-    const value = field === 'style_rules' ? raw.split(';').map((r) => r.trim()).filter(Boolean) : raw || null;
-    setError(null);
-    try {
-      const res = await fetch(`/api/threads/${id}/constraints`, {
-        method: 'PUT',
+  // PUT/DELETE return the thread's full constraint state, which is exactly the node data shape.
+  const call = (method, path, body) => {
+    const p = queue.current.then(async () => {
+      const res = await fetch(`/api/threads/${id}/constraints${path}`, {
+        method,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...constraints, [field]: value }),
+        body: body && JSON.stringify(body),
       });
-      const body = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(typeof body.detail === 'string' ? body.detail : res.statusText);
-      updateNodeData(id, { constraints: body.constraints });
-    } catch (e) {
-      setError(e.message);
-    }
+      const out = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(typeof out.detail === 'string' ? out.detail : res.statusText);
+      updateNodeData(id, out);
+    });
+    queue.current = p.catch(() => {});
+    return p;
   };
 
   const last = messages.at(-1);
   const violated = last?.role === 'assistant' && last.content.startsWith(REJECT_TAG);
-  const required = [constraints?.language, constraints?.database].filter(Boolean).join('/');
+  const required = [eff?.language, eff?.database].filter(Boolean).join('/');
 
   const fork = () => forkThread(id).catch((e) => setError(e.message));
 
@@ -100,21 +153,34 @@ function ChatThreadNode({ id, data }) {
         <button type="button" className="nodrag nopan" onClick={fork} disabled={busy || !messages.length}>
           Fork Thread
         </button>
+                <button type="button" className="nodrag nopan" onClick={remove} disabled={busy || deleting} title="Delete thread">
+          {deleting ? '…' : '🗑️'}
+        </button>
       </header>
 
-      {constraints && (
+      {eff && (
         <div className="badges">
           {Object.entries(FIELDS).map(([field, label]) => (
-            <Badge key={field} label={label} value={show(constraints[field])} onSave={(v) => override(field, v)} />
+            <Badge
+              key={field}
+              label={label}
+              value={show(eff[field])}
+              inherited={show(inh[field])}
+              overridden={field in ov}
+              onSave={(v) =>
+                call('PUT', '', { [field]: field === 'style_rules' ? v.split(';').map((r) => r.trim()).filter(Boolean) : v })
+              }
+              onRevoke={() => call('DELETE', `/${field}`)}
+            />
           ))}
         </div>
       )}
       {violated && (
         <p className="audit-alert" role="alert">
-          [⚠️ Constraint Alert: Parent thread requires {required || 'its inherited constraints'}. Architecture violation blocked.]
+          [⚠️ Constraint Alert: Thread requires {required || 'its effective constraints'}. Architecture violation blocked.]
         </p>
       )}
-      <div className="messages nodrag nopan nowheel" ref={list} >
+      <div className="messages nodrag nopan nowheel" ref={list}>
         {!messages.length && !busy && <p className="empty">Forked thread. It inherits the parent's constraints and compressed context — say something.</p>}
         {messages.map((m) => (
           <div key={m.id} className={`msg ${m.role}`}>{m.content}</div>

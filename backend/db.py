@@ -38,8 +38,8 @@ CREATE INDEX idx_threads_parent  ON threads(parent_id);
 CREATE INDEX idx_messages_thread ON messages(thread_id);
 """
 
-# One row per forked thread: the constraints it inherited over its parent edge (JSON) and the
-# compressed parent context that replaces the full ancestry in its LLM calls.
+# One row per forked thread: `constraints` = INHERITED constraints (parent's effective set at fork
+# time, JSON) and the compressed parent context that replaces the full ancestry in its LLM calls.
 SCHEMA_V2 = """
 CREATE TABLE edge_constraints (
     child_id    TEXT PRIMARY KEY REFERENCES threads(id) ON DELETE CASCADE,
@@ -48,6 +48,9 @@ CREATE TABLE edge_constraints (
     summary     TEXT NOT NULL DEFAULT ''
 );
 """
+
+# Local overrides (JSON object). Existing rows start with none.
+SCHEMA_V3 = "ALTER TABLE edge_constraints ADD COLUMN overrides TEXT NOT NULL DEFAULT '{}';"
 
 # Target thread up to the root (depth 0 = target), then messages oldest-ancestor-first.
 # rowid is insertion order, so it breaks created_at ties (1-second resolution).
@@ -89,6 +92,19 @@ def init():
             )
         if version < 2:
             c.executescript("BEGIN;" + SCHEMA_V2 + "PRAGMA user_version = 2; COMMIT;")
+        if version < 3:
+            c.executescript("BEGIN;" + SCHEMA_V3 + "PRAGMA user_version = 3; COMMIT;")
+
+
+def _edge(r):
+    """The ONLY place effective constraints are computed: overrides win over inherited."""
+    inherited, overrides = json.loads(r["constraints"]), json.loads(r["overrides"])
+    return {
+        "inherited_constraints": inherited,
+        "overrides": overrides,
+        "effective_constraints": {**inherited, **overrides},
+        "summary": r["summary"],
+    }
 
 
 def thread_exists(thread_id):
@@ -108,13 +124,14 @@ def _append(c, thread_id, msgs):
 
 
 def create_thread(thread_id, parent_id, msgs=(), edge=None):
-    """Insert a thread, its inherited edge ({"constraints", "summary"}) and first messages in one transaction."""
+    """Insert a thread, its edge ({"effective_constraints", "summary"} of the parent, stored as the
+    fork's inherited set, overrides empty) and first messages in one transaction."""
     with db() as c:
         c.execute("INSERT INTO threads (id, parent_id) VALUES (?, ?)", (thread_id, parent_id))
         if edge:
             c.execute(
                 "INSERT INTO edge_constraints (child_id, parent_id, constraints, summary) VALUES (?, ?, ?, ?)",
-                (thread_id, parent_id, json.dumps(edge["constraints"]), edge["summary"]),
+                (thread_id, parent_id, json.dumps(edge["effective_constraints"]), edge["summary"]),
             )
         if msgs:
             _append(c, thread_id, msgs)
@@ -125,6 +142,16 @@ def add_messages(thread_id, msgs):
     with db() as c:
         _append(c, thread_id, msgs)
 
+def delete_thread(thread_id):
+    """Delete a thread and all its descendants in one statement. False if it doesn't exist.
+    threads.parent_id has no ON DELETE CASCADE, so the subtree is selected explicitly;
+    messages and edge_constraints cascade from threads."""
+    with db() as c:
+        return c.execute(
+            "WITH RECURSIVE sub(id) AS (SELECT ? UNION ALL SELECT t.id FROM threads t JOIN sub ON t.parent_id = sub.id)"
+            " DELETE FROM threads WHERE id IN (SELECT id FROM sub)",
+            (thread_id,),
+        ).rowcount > 0
 
 def get_thread_messages(thread_id):
     with db() as c:
@@ -138,12 +165,12 @@ def get_thread_messages(thread_id):
 
 
 def all_threads():
-    """Every thread, oldest first, each with its ordered `messages` list."""
+    """Every thread, oldest first, each with its ordered `messages` list and `edge` (None for roots)."""
     with db() as c:
         threads = [
-            dict(r, messages=[], constraints=r["constraints"] and json.loads(r["constraints"]))
+            dict(r, messages=[], edge=r["constraints"] and _edge(r))
             for r in c.execute(
-                "SELECT t.id, t.parent_id, t.title, t.created_at, e.constraints"
+                "SELECT t.id, t.parent_id, t.title, t.created_at, e.constraints, e.overrides, e.summary"
                 " FROM threads t LEFT JOIN edge_constraints e ON e.child_id = t.id ORDER BY t.rowid"
             )
         ]
@@ -164,16 +191,25 @@ def get_thread_ancestry(thread_id):
         return [dict(r) for r in c.execute(ANCESTRY_SQL, (thread_id,))]
 
 
-def get_edge_constraints(thread_id):
-    """{"constraints": dict, "summary": str} for a forked thread, None for a root thread."""
+def get_edge(thread_id):
+    """Constraint state + summary for a forked thread, None for a root thread."""
     with db() as c:
-        r = c.execute("SELECT constraints, summary FROM edge_constraints WHERE child_id = ?", (thread_id,)).fetchone()
-    return r and {"constraints": json.loads(r["constraints"]), "summary": r["summary"]}
+        r = c.execute("SELECT * FROM edge_constraints WHERE child_id = ?", (thread_id,)).fetchone()
+    return r and _edge(r)
 
 
-def override_edge_constraints(child_id, constraints):
-    """Replace a fork's constraints, keeping its summary. False if the thread has no parent edge."""
+def _update(child_id, expr, arg):
+    # `expr` is a constant from this module; the single UPDATE is atomic, so concurrent writers can't lose updates.
     with db() as c:
-        return c.execute(
-            "UPDATE edge_constraints SET constraints = ? WHERE child_id = ?", (json.dumps(constraints), child_id)
-        ).rowcount == 1
+        n = c.execute(f"UPDATE edge_constraints SET overrides = {expr} WHERE child_id = ?", (arg, child_id)).rowcount
+        return n == 1 and _edge(c.execute("SELECT * FROM edge_constraints WHERE child_id = ?", (child_id,)).fetchone()) or None
+
+
+def set_override(child_id, patch):
+    """Merge {field: value} into a fork's overrides (arrays replace). None if the thread has no parent edge."""
+    return _update(child_id, "json_patch(overrides, ?)", json.dumps(patch))
+
+
+def revoke_override(child_id, field):
+    """Drop one field from a fork's overrides. None if the thread has no parent edge."""
+    return _update(child_id, "json_remove(overrides, ?)", f"$.{field}")
