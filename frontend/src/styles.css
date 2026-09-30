@@ -287,3 +287,9 @@ textarea:focus-visible {
   border: 1px solid var(--line);
   border-radius: 6px;
 }
+
+.badges { display: flex; flex-wrap: wrap; gap: 4px; padding: 4px 8px; }
+.badge { font: inherit; font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid #6366f1; background: rgb(99 102 241 / 0.12); color: inherit; cursor: pointer; }
+input.badge { cursor: text; width: 16ch; }
+.audit-alert { margin: 4px 8px; padding: 6px 10px; border: 1px solid #dc2626; border-radius: 6px; background: rgb(220 38 38 / 0.15); color: #dc2626; font-size: 12px; font-weight: 600; animation: audit-glow 1.6s ease-in-out infinite; }
+@keyframes audit-glow { 50% { box-shadow: 0 0 12px 2px rgb(220 38 38 / 0.7); } }

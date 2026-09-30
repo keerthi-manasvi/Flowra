@@ -1,14 +1,45 @@
 import { createContext, memo, useContext, useEffect, useRef, useState } from 'react';
-import { Handle, Position } from '@xyflow/react';
+import { Handle, Position, useReactFlow } from '@xyflow/react';
 import './styles.css';
 
 // Provided by App: { sendMessage(threadId, text) -> Promise, forkThread(threadId) -> Promise }.
 // Both reject with an Error on failure.
 export const CanvasContext = createContext(null);
 
+const REJECT_TAG = '[⚠️ AUDIT REJECTION:'; // must match backend main.REJECT_TAG
+const FIELDS = { language: 'Language', database: 'Database', style_rules: 'Style' };
+const show = (v) => (Array.isArray(v) ? v.join('; ') : v) || '';
+
+// Click to edit, Enter saves, Escape/blur cancels.
+function Badge({ label, value, onSave }) {
+  const [draft, setDraft] = useState(null); // null = not editing
+  if (draft === null) {
+    return (
+      <button type="button" className="badge nodrag nopan" title="Click to override" onClick={() => setDraft(value)}>
+        🔒 {label}: {value || '—'}
+      </button>
+    );
+  }
+  return (
+    <input
+      className="badge nodrag nopan"
+      autoFocus
+      value={draft}
+      aria-label={`Override ${label}`}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={() => setDraft(null)}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' && draft.trim() !== value) onSave(draft.trim());
+        if (e.key === 'Enter' || e.key === 'Escape') setDraft(null);
+      }}
+    />
+  );
+}
+
 function ChatThreadNode({ id, data }) {
   const { sendMessage, forkThread } = useContext(CanvasContext);
-  const { title, messages } = data;
+  const { updateNodeData } = useReactFlow(); // writes through App's onNodesChange -> canvas re-renders
+  const { title, messages, constraints } = data;
 
   const [text, setText] = useState('');
   const [inflight, setInflight] = useState(null); // user text awaiting its reply
@@ -37,6 +68,27 @@ function ChatThreadNode({ id, data }) {
     }
   };
 
+  const override = async (field, raw) => {
+    const value = field === 'style_rules' ? raw.split(';').map((r) => r.trim()).filter(Boolean) : raw || null;
+    setError(null);
+    try {
+      const res = await fetch(`/api/threads/${id}/constraints`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...constraints, [field]: value }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(typeof body.detail === 'string' ? body.detail : res.statusText);
+      updateNodeData(id, { constraints: body.constraints });
+    } catch (e) {
+      setError(e.message);
+    }
+  };
+
+  const last = messages.at(-1);
+  const violated = last?.role === 'assistant' && last.content.startsWith(REJECT_TAG);
+  const required = [constraints?.language, constraints?.database].filter(Boolean).join('/');
+
   const fork = () => forkThread(id).catch((e) => setError(e.message));
 
   return (
@@ -49,8 +101,21 @@ function ChatThreadNode({ id, data }) {
           Fork Thread
         </button>
       </header>
+
+      {constraints && (
+        <div className="badges">
+          {Object.entries(FIELDS).map(([field, label]) => (
+            <Badge key={field} label={label} value={show(constraints[field])} onSave={(v) => override(field, v)} />
+          ))}
+        </div>
+      )}
+      {violated && (
+        <p className="audit-alert" role="alert">
+          [⚠️ Constraint Alert: Parent thread requires {required || 'its inherited constraints'}. Architecture violation blocked.]
+        </p>
+      )}
       <div className="messages nodrag nopan nowheel" ref={list} >
-        {!messages.length && !busy && <p className="empty">Forked thread. It inherits the full parent conversation — say something.</p>}
+        {!messages.length && !busy && <p className="empty">Forked thread. It inherits the parent's constraints and compressed context — say something.</p>}
         {messages.map((m) => (
           <div key={m.id} className={`msg ${m.role}`}>{m.content}</div>
         ))}

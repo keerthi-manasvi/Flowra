@@ -1,3 +1,4 @@
+import json
 import sqlite3
 import uuid
 from contextlib import contextmanager
@@ -37,6 +38,17 @@ CREATE INDEX idx_threads_parent  ON threads(parent_id);
 CREATE INDEX idx_messages_thread ON messages(thread_id);
 """
 
+# One row per forked thread: the constraints it inherited over its parent edge (JSON) and the
+# compressed parent context that replaces the full ancestry in its LLM calls.
+SCHEMA_V2 = """
+CREATE TABLE edge_constraints (
+    child_id    TEXT PRIMARY KEY REFERENCES threads(id) ON DELETE CASCADE,
+    parent_id   TEXT NOT NULL REFERENCES threads(id),
+    constraints TEXT NOT NULL,
+    summary     TEXT NOT NULL DEFAULT ''
+);
+"""
+
 # Target thread up to the root (depth 0 = target), then messages oldest-ancestor-first.
 # rowid is insertion order, so it breaks created_at ties (1-second resolution).
 ANCESTRY_SQL = """
@@ -54,7 +66,7 @@ ORDER BY chain.depth DESC, m.rowid
 
 @contextmanager
 def db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30.0)  # wait on a busy writer instead of raising
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     try:
@@ -75,6 +87,8 @@ def init():
             c.executescript(
                 "BEGIN;" + SCHEMA_V1 + (LEGACY_IMPORT if legacy else "") + "PRAGMA user_version = 1; COMMIT;"
             )
+        if version < 2:
+            c.executescript("BEGIN;" + SCHEMA_V2 + "PRAGMA user_version = 2; COMMIT;")
 
 
 def thread_exists(thread_id):
@@ -93,10 +107,15 @@ def _append(c, thread_id, msgs):
     )
 
 
-def create_thread(thread_id, parent_id, msgs=()):
-    """Insert a thread and its first (role, content) messages in one transaction."""
+def create_thread(thread_id, parent_id, msgs=(), edge=None):
+    """Insert a thread, its inherited edge ({"constraints", "summary"}) and first messages in one transaction."""
     with db() as c:
         c.execute("INSERT INTO threads (id, parent_id) VALUES (?, ?)", (thread_id, parent_id))
+        if edge:
+            c.execute(
+                "INSERT INTO edge_constraints (child_id, parent_id, constraints, summary) VALUES (?, ?, ?, ?)",
+                (thread_id, parent_id, json.dumps(edge["constraints"]), edge["summary"]),
+            )
         if msgs:
             _append(c, thread_id, msgs)
 
@@ -122,8 +141,11 @@ def all_threads():
     """Every thread, oldest first, each with its ordered `messages` list."""
     with db() as c:
         threads = [
-            dict(r, messages=[])
-            for r in c.execute("SELECT id, parent_id, title, created_at FROM threads ORDER BY rowid")
+            dict(r, messages=[], constraints=r["constraints"] and json.loads(r["constraints"]))
+            for r in c.execute(
+                "SELECT t.id, t.parent_id, t.title, t.created_at, e.constraints"
+                " FROM threads t LEFT JOIN edge_constraints e ON e.child_id = t.id ORDER BY t.rowid"
+            )
         ]
         by_id = {t["id"]: t for t in threads}
         for m in c.execute("SELECT id, thread_id, role, content, created_at FROM messages ORDER BY rowid"):
@@ -140,3 +162,18 @@ def get_thread_ancestry(thread_id):
     """
     with db() as c:
         return [dict(r) for r in c.execute(ANCESTRY_SQL, (thread_id,))]
+
+
+def get_edge_constraints(thread_id):
+    """{"constraints": dict, "summary": str} for a forked thread, None for a root thread."""
+    with db() as c:
+        r = c.execute("SELECT constraints, summary FROM edge_constraints WHERE child_id = ?", (thread_id,)).fetchone()
+    return r and {"constraints": json.loads(r["constraints"]), "summary": r["summary"]}
+
+
+def override_edge_constraints(child_id, constraints):
+    """Replace a fork's constraints, keeping its summary. False if the thread has no parent edge."""
+    with db() as c:
+        return c.execute(
+            "UPDATE edge_constraints SET constraints = ? WHERE child_id = ?", (json.dumps(constraints), child_id)
+        ).rowcount == 1
