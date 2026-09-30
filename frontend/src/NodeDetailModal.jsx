@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import Markdown from './Markdown.jsx';
 
 const show = (v) => (Array.isArray(v) ? v.join('; ') : v);
 
@@ -6,11 +7,18 @@ export default function NodeDetailModal({ node, onClose, onFork, onSelect }) {
   const ref = useRef(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
+  const [copied, setCopied] = useState(false);
   const { title, parent_id, summary, effective_constraints: eff, messages } = node.data;
 
   useEffect(() => {
     if (!ref.current.open) ref.current.showModal(); // Escape fires `close` natively
   }, []);
+
+  const copyId = () =>
+    navigator.clipboard.writeText(node.id).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1200);
+    });
 
   const fork = async () => {
     setBusy(true);
@@ -28,12 +36,16 @@ export default function NodeDetailModal({ node, onClose, onFork, onSelect }) {
     <dialog ref={ref} className="detail" onClose={onClose} onClick={(e) => e.target === ref.current && onClose()}>
       <header>
         <div>
-          <small>
-            Thread {node.id}
+          <div className="ids">
+            <button type="button" className="link" title="Copy thread id" onClick={copyId}>
+              {copied ? 'Copied ✓' : `Thread #${node.id.slice(0, 7)}…`}
+            </button>
             {parent_id && (
-              <> · parent <button type="button" className="link" onClick={() => onSelect(parent_id)}>{parent_id.slice(0, 8)}</button></>
+              <button type="button" className="crumb" title="Show parent on canvas" onClick={() => onSelect(parent_id)}>
+                Parent: #{parent_id.slice(0, 8)}
+              </button>
             )}
-          </small>
+          </div>
           <h3>{title || 'New thread'}</h3>
         </div>
         <button type="button" aria-label="Close" onClick={onClose}>✕</button>
@@ -49,21 +61,23 @@ export default function NodeDetailModal({ node, onClose, onFork, onSelect }) {
       )}
 
       {summary && (
-        <section>
-          <h4>Parent context summary</h4>
-          <p className="summary">{summary}</p>
-        </section>
+        <details>
+          <summary>Parent context summary (click to expand)</summary>
+          <p>{summary}</p>
+        </details>
       )}
 
       <section className="history">
         <h4>Conversation</h4>
-        {messages.length ? messages.map((m) => <div key={m.id} className={`msg ${m.role}`}>{m.content}</div>) : <p className="empty">No messages yet.</p>}
+        {messages.length
+          ? messages.map((m) => <div key={m.id} className={`msg ${m.role}`}><Markdown>{m.content}</Markdown></div>)
+          : <p className="empty">No messages yet.</p>}
       </section>
 
       <footer>
         {error && <span className="error" role="alert">{error}</span>}
-        <button type="button" onClick={fork} disabled={busy || !messages.length}>{busy ? '…' : 'Fork Thread'}</button>
-        <button type="button" onClick={onClose}>Close</button>
+        <button type="button" className="ghost" onClick={onClose}>Close</button>
+        <button type="button" className="primary" onClick={fork} disabled={busy || !messages.length}>{busy ? '…' : 'Fork Thread'}</button>
       </footer>
     </dialog>
   );

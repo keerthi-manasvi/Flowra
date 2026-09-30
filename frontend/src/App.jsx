@@ -1,9 +1,9 @@
+import CanvasControls from './CanvasControls.jsx';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Background,
   Controls,
   MarkerType,
-  Panel,
   ReactFlow,
   ReactFlowProvider,
   useEdgesState,
@@ -17,7 +17,7 @@ import { layout } from './layout.js';
 import NodeDetailModal from './NodeDetailModal.jsx';
 
 const nodeTypes = { chatThread: ChatThreadNode };
-const edgeOptions = { type: 'smoothstep', markerEnd: { type: MarkerType.ArrowClosed } };
+const edgeOptions = { type: 'default', markerEnd: { type: MarkerType.ArrowClosed } };
 
 async function request(method, url, body) {
   const res = await fetch(url, {
@@ -37,6 +37,12 @@ function NewThread({ onStart }) {
   const [text, setText] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
+  const field = useRef(null);
+
+  useEffect(() => {
+    field.current.style.height = 'auto'; // also shrinks it back after a send
+    field.current.style.height = `${field.current.scrollHeight}px`;
+  }, [text]);
 
   const submit = async () => {
     const value = text.trim();
@@ -54,25 +60,27 @@ function NewThread({ onStart }) {
   };
 
   return (
-    <div className="composer">
-      <textarea
-        className="nodrag nowheel nopan"
-        rows={3}
-        value={text}
-        disabled={busy}
-        placeholder="Start a new conversation…"
-        onChange={(e) => setText(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' && !e.shiftKey) {
-            e.preventDefault();
-            submit();
-          }
-        }}
-      />
-      {error && <div className="error"><p>{error}</p></div>}
-      <button type="button" onClick={submit} disabled={busy || !text.trim()}>
-        {busy ? 'Starting…' : 'Start'}
-      </button>
+    <div className="start">
+      <div className="start-bar">
+        <textarea
+          ref={field}
+          rows={1}
+          value={text}
+          disabled={busy}
+          placeholder="Start a new conversation..."
+          onChange={(e) => setText(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+              e.preventDefault();
+              submit();
+            }
+          }}
+        />
+        <button type="button" className="primary" onClick={submit} disabled={busy || !text.trim()}>
+          {busy ? 'Starting…' : 'Start'}
+        </button>
+      </div>
+      {error && <p className="start-error" role="alert">{error}</p>}
     </div>
   );
 }
@@ -80,14 +88,22 @@ function NewThread({ onStart }) {
 function Canvas() {
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
-  const { fitView } = useReactFlow();
+  const { fitView, getViewport, setViewport } = useReactFlow();
+  const wrap = useRef(null);
   const initialized = useNodesInitialized();
   const fitted = useRef(false);
   const [selectedId, setSelectedId] = useState(null);
   const selected = nodes.find((n) => n.id === selectedId); // derived, so it never goes stale
-  const onNodeClick = useCallback((e, n) => {
-    if (!e.target.closest('button, input, textarea, .messages')) setSelectedId(n.id);
+    const onNodeClick = useCallback((e, n) => {
+    if (!e.target.closest('button, input, textarea, summary, .pop') && !window.getSelection()?.toString()) setSelectedId(n.id);
   }, []);
+  const focusNode = useCallback(
+    (id) => {
+      setSelectedId(null);
+      fitView({ nodes: [{ id }], duration: 300, maxZoom: 1 });
+    },
+    [fitView],
+  );
 
   // Refs hold the latest graph so concurrent async completions never merge into stale state.
   const nodesRef = useRef(nodes);
@@ -194,10 +210,51 @@ function Canvas() {
     }
   }, [initialized, nodes.length, fitView]);
 
+    // Figma-style zoom: Ctrl/Cmd+wheel and trackpad pinch, exponential, cursor-anchored, applied instantly once per frame.
+  useEffect(() => {
+    const el = wrap.current;
+    let raf = 0, acc = 0, px = 0, py = 0, idle = 0;
+    const flush = () => {
+      raf = 0;
+      const { x, y, zoom } = getViewport();
+      const z = Math.min(2, Math.max(0.2, zoom * Math.exp(acc)));
+      acc = 0;
+      const r = el.getBoundingClientRect();
+      const cx = px - r.left, cy = py - r.top, k = z / zoom;
+      setViewport({ x: cx - (cx - x) * k, y: cy - (cy - y) * k, zoom: z });
+    };
+    const onWheel = (e) => {
+      if (!e.ctrlKey && !e.metaKey) return; // plain wheel keeps panning / scrolling cards
+      e.preventDefault();
+      e.stopPropagation(); // capture phase: React Flow's slower d3 handler never sees it
+      const d = Math.max(-100, Math.min(100, e.deltaMode === 1 ? e.deltaY * 33 : e.deltaY));
+      acc -= d * (Math.abs(d) < 50 ? 0.012 : 0.004); // pinch sends small deltas, mouse notches send ~100
+      px = e.clientX;
+      py = e.clientY;
+      el.classList.add('zooming');
+      clearTimeout(idle);
+      idle = setTimeout(() => el.classList.remove('zooming'), 150);
+      raf ||= requestAnimationFrame(flush);
+    };
+    el.addEventListener('wheel', onWheel, { passive: false, capture: true });
+    return () => {
+      el.removeEventListener('wheel', onWheel, { capture: true });
+      cancelAnimationFrame(raf);
+      clearTimeout(idle);
+    };
+  }, [getViewport, setViewport]);
+
   const context = useMemo(() => ({ sendMessage, forkThread, deleteThread }), [sendMessage, forkThread, deleteThread]);
 
   return (
-    <CanvasContext.Provider value={context}>
+  <CanvasContext.Provider value={context}>
+    <div
+      ref={wrap}
+      style={{
+        width: '100%',
+        height: '100%',
+      }}
+    >
       <ReactFlow
         nodes={nodes}
         edges={edges}
@@ -211,21 +268,32 @@ function Canvas() {
         nodesConnectable={false}
         elementsSelectable={false}
         deleteKeyCode={null}
-        minZoom={0.1}
+        minZoom={0.2}
+        maxZoom={2}
+        panOnScroll
+        panOnScrollSpeed={1.5}
+        onlyRenderVisibleElements
+        zoomOnScroll={false}
+        panOnDrag={[1, 2]}
         colorMode="system"
         proOptions={{ hideAttribution: true }}
       >
         <Background gap={24} />
-        <Controls showInteractive={false} />
-        <Panel position="top-left" className="new-chat">
-          <NewThread onStart={startThread} />
-        </Panel>
+
+        <CanvasControls />
       </ReactFlow>
-      {selected && (
-        <NodeDetailModal node={selected} onClose={() => setSelectedId(null)} onFork={forkThread} onSelect={setSelectedId} />
-      )}
-    </CanvasContext.Provider>
-  );
+    </div>
+    <NewThread onStart={startThread} />
+    {selected && (
+      <NodeDetailModal
+        node={selected}
+        onClose={() => setSelectedId(null)}
+        onFork={forkThread}
+        onSelect={focusNode}
+      />
+    )}
+  </CanvasContext.Provider>
+);
 }
 
 export default function App() {
