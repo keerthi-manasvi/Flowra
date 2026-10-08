@@ -36,16 +36,6 @@ export default function NodeDetailModal({ node, onClose, onFork, onSelect }) {
     <dialog ref={ref} className="detail" onClose={onClose} onClick={(e) => e.target === ref.current && onClose()}>
       <header>
         <div>
-          <div className="ids">
-            <button type="button" className="link" title="Copy thread id" onClick={copyId}>
-              {copied ? 'Copied ✓' : `Thread #${node.id.slice(0, 7)}…`}
-            </button>
-            {parent_id && (
-              <button type="button" className="crumb" title="Show parent on canvas" onClick={() => onSelect(parent_id)}>
-                Parent: #{parent_id.slice(0, 8)}
-              </button>
-            )}
-          </div>
           <h3>{title || 'New thread'}</h3>
         </div>
         <button type="button" aria-label="Close" onClick={onClose}>✕</button>
