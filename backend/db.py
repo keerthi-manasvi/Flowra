@@ -2,8 +2,9 @@ import json
 import sqlite3
 import uuid
 from contextlib import contextmanager
+from pathlib import Path
 
-DB_PATH = "forkcanvas.db"
+DB_PATH = str(Path(__file__).resolve().parent / "forkcanvas.db")
 
 # Only run when the old message-level `nodes` table exists. Every user node becomes a thread
 # holding itself + its assistant replies; its parent thread is the user node two hops up.
