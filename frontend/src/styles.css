@@ -93,7 +93,7 @@ textarea:focus-visible {
   box-sizing: border-box;
   padding: 10px 12px;
   color: var(--ink);
-  background: #eff1de;
+  background: #efe2e9;
   border: 1px solid #666664;
   border-radius: 8px;
   box-shadow: 0 1px 3px rgba(31, 35, 40, 0.08);
@@ -300,7 +300,7 @@ textarea:focus-visible {
   gap: 8px; 
   padding: 5px 8px; 
   background: var(--card); 
-  border: 2px solid #313130; 
+  border: 1.5px solid #313130; 
   border-radius: 8px;
   box-shadow: 0 1px 3px rgba(31, 35, 40, 0.08);
 }
@@ -343,7 +343,7 @@ textarea:focus-visible {
   box-sizing: border-box;
   padding: 8px;
   background: var(--card);
-  border: 5px solid #4e3e3f;
+  border: 1.5px solid #4e3e3f;
   border-radius: 8px;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
 }
@@ -421,7 +421,7 @@ input.badge { width: 16ch; }
   padding: 16px;
   color: var(--ink);
   background: #f6f7f3;
-  border: 2px solid #4e3e3f;
+  border: 1.5px solid #4e3e3f;
   border-radius: 8px;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
   display: flex;
@@ -517,8 +517,31 @@ input.badge { width: 16ch; }
 .md > :last-child { margin-bottom: 0; }
 .md p, .md ul, .md ol { margin: 0 0 6px; }
 .md h1, .md h2, .md h3, .md h4 { margin: 8px 0 4px; font-size: 1em; font-weight: 500; color: var(--ink); }
-.md table { border-collapse: collapse; }
-.md th, .md td { border: 1px solid var(--line); padding: 2px 6px; }
+.md {
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.md table {
+  width: max-content;
+  min-width: 100%;
+  table-layout: auto;
+  border-collapse: collapse;
+}
+
+.md th:first-child,
+.md td:first-child {
+  white-space: nowrap;
+  min-width: 2.5rem;
+  text-align: center;
+}
+
+.md th,
+.md td {
+  border: 1px solid var(--line);
+  padding: 2px 6px;
+}
 .md :not(pre) > code { padding: 0 4px; border-radius: 4px; background: var(--user); font-family: monospace; font-size: 12px; }
 .md pre { margin: 0; white-space: pre; overflow-x: auto; font-size: 12px; }
 

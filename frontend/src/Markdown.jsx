@@ -2,6 +2,8 @@ import { useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
+import rehypeRaw from 'rehype-raw';
+import rehypeSanitize from 'rehype-sanitize';
 import 'highlight.js/styles/github-dark.css';
 
 function Pre({ children }) {
@@ -25,7 +27,8 @@ function Pre({ children }) {
 }
 
 const remark = [remarkGfm];
-const rehype = [rehypeHighlight];
+// Include rehypeRaw and rehypeSanitize alongside rehypeHighlight
+const rehype = [rehypeRaw, rehypeSanitize, rehypeHighlight];
 const components = { pre: Pre };
 
 // compact = canvas card: plain Markdown, no highlighter or code header.
@@ -34,7 +37,7 @@ export default function Markdown({ children, compact }) {
     <div className="md">
       <ReactMarkdown
         remarkPlugins={remark}
-        rehypePlugins={compact ? [] : rehype}
+        rehypePlugins={compact ? [rehypeRaw, rehypeSanitize] : rehype}
         components={compact ? undefined : components}
       >
         {children}
